@@ -1,0 +1,13 @@
+model,accuracy
+Naive-classification: All fail,59.1257908914364
+Only currency,59.1257908914364
+Only country,59.1257908914364
+Only category,64.7935851656957
+Only goal,61.0223642172524
+Only real USD goal,60.8062394286788
+Only duration,62.0419094155234
+Every non-title feature,68.4583098415085
+Document vectors only (200minmax),64.0903965420034
+Top from baseline comparison,69.6642235168828
+Top from document vector comparison,69.79
+Final Model after hyperparameter optimisation,69.9727494831799
