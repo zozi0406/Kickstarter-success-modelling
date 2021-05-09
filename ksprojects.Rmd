@@ -1,0 +1,883 @@
+---
+title: "Which projects succeed on kickstarter - can titles help predict?"
+author: "ID: 1808375"
+date: "10/04/2021"
+output: 
+  html_document:
+    theme: lumen
+---
+<style>
+body {
+text-align: justify}
+</style>
+
+Word count: 1489
+
+***
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(caret)
+library(text2vec)
+library(stopwords)
+library(tokenizers)
+library(Matrix)
+library(knitr)
+library(xgboost)
+library(mltools)
+library(data.table)
+library(superml)
+library(e1071)
+library(Rfast)
+library(glmnet)
+library(randomForest)
+
+```
+
+# Introduction
+
+Since 2009, Kickstarter hosted crowdfunding campaigns raising over 5.8 billion USD to different projects, successfully funding over 200000 projects (Kickstarter, n.d.). The website focuses on all kinds of creative projects, spanning across the categories of art, technology, games, food, and others. Businesses seeking early financing face hard supply constraints generally due to the strong information asymmetries present in the market (Zhao et al., 2019). Crowdfunding platforms such as Kickstarter provide SMEs with an alternative way of raising capital. Despite the opportunity existing for any business, 61.28% (Kickstarter, n.d.) of projects do not reach their goal. This paper aims to estimate a predictive model of project success relying on the “Kickstarter Projects” dataset on Kaggle (Mouillé, 2018). 
+
+Predicting whether a project succeeds has been the focus of several papers in the last decade. Certain researchers (Chen et al., 2013; Etter et al., 2013) focused on predicting success mid-campaign, while others (Hu and Yang, 2019; Sawhney et al., 2016) aimed to predict it using data available before launch. The latter set of papers generally rely on the same input variables: country, category, goal, currency, duration, title, and description. Based on these, various data and text mining approaches are used to extract features used by their models. While Sawhney et al. (2016) compare different methods from the NLP toolkit, Hu and Yang (2019) use the length of titles and descriptions as features. Regarding the choice of classification algorithms, most of the mentioned papers compare several methods to find the most suitable one. Often used methods include the Logistic regression (Kleinbaum and Klein, 2010), AdaBoost (Bahad and Saxena, 2020), the Support Vector Machine (Suthaharan, 2016), the Random Forest (Breiman, 2001), and XGBoost (Chen and Guestrin, 2016).
+
+
+# Data and Modelling
+
+The dataset (Mouillé, 2018) contains 378661 scraped Kickstarter projects that launched between 2009 and 2018. The raw variables used in the project include:
+
+* Name: title of the project; text variable
+* Category: project category; categorical variable
+* Currency: currency of the project; categorical variable
+* Goal: amount of currency to be raised; numerical variable
+* Goal in real USD: amount of real used to be raised indexed to the time of scraping on the 2nd of January 2018; numerical variable
+* Country: location of the project; categorical variable
+* Duration: days between the deadline and the launch date; numerical variable
+* State: successful, failed, live, cancelled, suspended, or undefined; categorical variable
+
+As the goal of this paper is to distinguish successful and failed projects (331675 obs.), only these observations are kept. Categorical variables are included with one-hot-encoding, dropping the first column in every case.
+
+The following 4 steps describe the estimation strategy:
+
+1. Creation of document vectors based on titles 
+2. Baseline comparison of classification methods
+3. Comparison of aggregation methods and dimension of document vectors
+4. Hyperparameter optimisation and final comparison
+
+```{r importdata,message=FALSE}
+ksprojects<-read_csv("ks-projects-201801.csv")
+
+### Aim is to decide whether a project has been successful or failed, all other states are dropped.
+### 87.6% data retained
+ksprojects <- ksprojects %>% filter(state=="failed"|state=="successful")
+
+
+### 213 observations with missing values, these are dropped due to the abundance of data.
+ksprojects <- ksprojects[complete.cases(ksprojects),]
+
+
+### Only keep variables which are determined pre-launch
+ksprojects$duration<-difftime(ksprojects$deadline,ksprojects$launched,units="days") %>% as.numeric
+ksprojects <- ksprojects %>% select(-c(main_category,deadline,launched,pledged,backers,`usd pledged`, usd_pledged_real))
+
+ksprojects$state <- ksprojects$state %>% str_replace("successful","1") %>% str_replace("failed","0") %>% as.numeric
+
+
+
+
+
+```
+
+
+
+## Document vectors
+
+The method of word embeddings entails the representation of words with numerical vectors based on their co-occurrence in a corpus. The specific type of word embeddings used by this project are the GloVe 6B vectors (Pennington et al., 2014) pre-trained on Wikipedia and the Gigaword 5 dataset (Parker, Robert et al., n.d.). The package includes word embeddings for 400000 words with 50, 200 or 300 length vectors. These are chosen above the other available pre-trained GloVe vectors, as they have a generic vocabulary (as opposed to the 2B vectors, which come from Twitter), but still contain vectors with smaller dimensions.
+
+To prepare the data for matching with the word vectors, the titles are broken up into tokens and a vocabulary is built and pruned to include words that appear at least 5 times. The words in the vocabulary that also appear in the word embeddings are joined with their numerical representations, constituting lexicons for every vector length. As not every word is contained in the GloVe vectors, leading to additional pruning of the vocabulary. Projects without any meaningful tokens are dropped, leaving 319264 projects as the final number of observations. Note that this introduces a limitation for future predictions of the model, as it can only accept projects with at least one meaningful term.
+
+```{r name_column_processing,message=FALSE,warning=FALSE}
+
+
+### Throughout the script, if statements checking for the existence of files, such as the one below, are included to allow the script to execute without re-running every line.
+### The aim of this is to reduce unnecessary runtime, as the full project takes roughly 24 hours to finish. When the intermediate and final results are in place, the script executes in a matter of minutes.
+### The document vectors created below need to be created using the script, as they exceed the maximum file size of Github of 100MB. This process is still time-consuming, taking a few of hours.
+### The result files can be found on Github: https://github.com/zozi0406/Kickstarter-success-modelling
+### The GloVe vectors are downloaded via the code below.
+if (!file.exists('glove.6B.zip')) {
+  
+  ### Download pre-trained GloVe vectors
+  download.file('https://nlp.stanford.edu/data/glove.6B.zip',destfile = 'glove.6B.zip')
+  unzip('glove.6B.zip')
+  
+}
+
+vectors50 = data.table::fread('glove.6B.50d.txt', data.table = F,  encoding = 'UTF-8')
+vectors200 = data.table::fread('glove.6B.200d.txt', data.table = F,  encoding = 'UTF-8')
+vectors300 = data.table::fread('glove.6B.300d.txt', data.table = F,  encoding = 'UTF-8')
+
+colnames(vectors50) = c('word',paste('dim',1:50,sep = '_'))
+colnames(vectors200) = c('word',paste('dim',1:200,sep = '_'))
+colnames(vectors300) = c('word',paste('dim',1:300,sep = '_'))
+
+tokens<-itoken(ksprojects$name,tolower,tokenize_words,ids=ksprojects$ID)
+
+vocab<-create_vocabulary(tokens,stopwords=stopwords())
+vocab<-prune_vocabulary(vocab,term_count_min = 5)
+
+
+###Extract term column of the vocabulary to attain a list of tokens present in the corpus
+words<-vocab %>% select(term)
+names(words)<-"word"
+
+### find intersection of vocab words and Glove 6B words and create the "embedding lexicons" for different number of dimensions.
+word_embeddings50 <- words %>% inner_join(vectors50,by="word") %>% as.data.table
+word_embeddings200 <- words %>% inner_join(vectors200,by="word") %>% as.data.table
+word_embeddings300 <- words %>% inner_join(vectors300,by="word") %>% as.data.table
+
+tokenizedwords<-tokenize_words(ksprojects$name)
+
+### create boolean mask for filtering projects with names that do not have words in the pruned vocabulary or do not have an embedding in the Glove 6B
+
+if(!file.exists("./usedprojects.csv")){
+  
+  mask<-sapply(tokenizedwords,function(word){
+    if(word %in% word_embeddings50$word %>% sum > 0) return(TRUE)
+    return(FALSE)
+  })
+  
+  
+  ### Apply mask to the dataset to attain the sample of interest. 12198 observations are dropped.
+  usedprojects<-ksprojects[mask,]
+  fwrite(usedprojects,"./usedprojects.csv")
+} else {
+  usedprojects<-fread("./usedprojects.csv")
+  
+}
+
+### Recreate word tokens for used projects
+tokenizedwords<-tokenize_words(usedprojects$name)
+
+### Clear up memory.
+rm(vectors50,vectors200,vectors300,vocab,tokens,words)
+gc() %>% invisible
+```
+
+A document vector is an aggregation of word embeddings for a given document. The aggregation method is a crucial decision, as information is lost using any operation. De Boom et al. (2016) discusses several methods for aggregating word vectors, comparing their performance on small documents similar to this use-case. Based on their baseline methods, the three aggregation types examined are the dimension-wise maximum, mean and the concatenation of the dimension-wise minimum and maximum. Note, the last method doubles the dimensions of the document vectors. These aggregations are created for 50-, 200- and 300-dimension vectors. 
+
+```{r docvector_creation,message=FALSE}
+
+createdocvectors<-function(tokwords,operation="mean",embeds,length){
+  ### Creates document vectors with chosen aggregation method, and saves them in the ./docvectors directory.
+  ### Inputs are: 
+  # tokwords: list of lists of tokenized words per document
+  # operation: mean/max/minmax aggregation method of individual word embeddings
+  # embeds: word embedding "lexicon"
+  # length: embedding dimensions
+  
+  add_suffix<-function(df,suf) {
+    ### Helper function to add a suffix to the end of column names of a dataframe/datatable
+    df<-as.data.frame(df) %>% t
+    colnames(df)<-paste(colnames(df),suf,sep="_") 
+    return(df %>% as.data.table())
+  }
+  
+  ### Create folder and set up loop variables
+  dir.create("./docvectors/",showWarnings = F)
+  dvecs<-NULL
+  filename<-paste0("./docvectors/docvector",length,operation,".csv")
+  firstrun<-T
+  paste0("Building ",filename, ".") %>% print
+  
+  ### Index the embedding lexicon using the "word" column as index to speed-up lookups 
+  setkey(embeds, word)
+  
+  ### Main loop through every document
+  for(i in 1:length(tokwords)) {
+    
+    ### Match embedding with tokens in a document
+    words<- tokwords[i] %>% unlist(F,F)
+    matchedwords<-embeds[.(words),2:(length+1),nomatch=0L] %>% as.data.table
+    
+    ### Create aggregated document vector based on aggregation method chosen
+    if(operation=="mean") entry <-  matchedwords %>% apply(2,mean) %>% as.list %>%  as.data.table()
+    if(operation=="max") entry<- matchedwords %>% apply(2,max) %>% as.list %>% as.data.table
+    if(operation=="minmax") {
+      minvals<-matchedwords %>% apply(2,min) %>% add_suffix("min")
+      maxvals<-matchedwords %>% apply(2,max) %>% add_suffix("max")
+      entry<-bind_cols(minvals,maxvals)
+    }
+    
+    ###Add entry to previous entries
+    if(is.null(dvecs)) dvecs<- entry else dvecs<-rbindlist(list(dvecs,entry))
+    
+    ### After every 10000 documents, dump results to disk and reset dvecs. This is to prevent memory leakage from large rbinds.
+    if(!(i %% 10000)&(i!=length(tokwords))) {
+      paste0(i, " out of ",length(tokwords)," finished") %>% print
+      fwrite(dvecs %>% as.data.table,file=filename,append=!firstrun,col.names=firstrun)
+      firstrun<-F
+      dvecs<-NULL
+    }
+  }
+  
+  ### Dump remaining observations to disk and read back and return the whole data table from the disk.
+  paste0("Finished ",filename,".") %>% print
+  fwrite( dvecs %>% as.data.table, file=filename, append=TRUE, col.names=FALSE )
+  return(fread(file=filename,data.table=T,encoding="UTF-8"))
+}
+
+
+### Create mean document vectors, or if the files have already been constructed, they are read back in from disk.
+if (!file.exists('./docvectors/docvector50mean.csv')) {
+  docvectors50mean<-createdocvectors(tokwords=tokenizedwords,operation = "mean",embeds = word_embeddings50,length = 50)
+} else {
+  docvectors50mean<-fread('./docvectors/docvector50mean.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector200mean.csv')) {
+  docvectors200mean<-createdocvectors(tokwords=tokenizedwords,operation = "mean",embeds = word_embeddings200,length = 200)
+} else {
+  docvectors200mean<-fread('./docvectors/docvector200mean.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector300mean.csv')) {
+  docvectors300mean<-createdocvectors(tokwords=tokenizedwords,operation = "mean",embeds = word_embeddings300,length = 300)
+} else {
+  docvectors300mean<-fread('./docvectors/docvector300mean.csv',encoding = 'UTF-8')
+}
+
+### Drop from memory for now to reduce memory use. They can be read back the same way again.
+rm(docvectors50mean,docvectors200mean,docvectors300mean)
+gc() %>% invisible
+
+### Repeat for max aggregation
+if (!file.exists('./docvectors/docvector50max.csv')) {
+  docvectors50max<-createdocvectors(tokwords=tokenizedwords,operation = "max",embeds = word_embeddings50,length = 50)
+} else {
+  docvectors50max<-fread('./docvectors/docvector50max.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector200max.csv')) {
+  docvectors200max<-createdocvectors(tokwords=tokenizedwords,operation = "max",embeds = word_embeddings200,length = 200)
+} else {
+  docvectors200max<-fread('./docvectors/docvector200max.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector300max.csv')) {
+  docvectors300max<-createdocvectors(tokwords=tokenizedwords,operation = "max",embeds = word_embeddings300,length = 300)
+} else {
+  docvectors300max<-fread('./docvectors/docvector300max.csv',encoding = 'UTF-8')
+}
+
+rm(docvectors50max,docvectors200max,docvectors300max)
+gc() %>% invisible
+
+### Repeat for minmax aggregation
+if (!file.exists('./docvectors/docvector50minmax.csv')) {
+  docvectors50minmax<-createdocvectors(tokwords=tokenizedwords,operation = "minmax",embeds = word_embeddings50,length = 50)
+} else {
+  docvectors50minmax<-fread('./docvectors/docvector50minmax.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector200minmax.csv')) {
+  docvectors200minmax<-createdocvectors(tokwords=tokenizedwords,operation = "minmax",embeds = word_embeddings200,length = 200)
+} else {
+  docvectors200minmax<-fread('./docvectors/docvector200minmax.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector300minmax.csv')) {
+  docvectors300minmax<-createdocvectors(tokwords=tokenizedwords,operation = "minmax",embeds = word_embeddings300,length = 300)
+} else {
+  docvectors300minmax<-fread('./docvectors/docvector300minmax.csv',encoding = 'UTF-8')
+}
+
+rm(docvectors50minmax,docvectors200minmax,docvectors300minmax)
+gc() %>% invisible
+
+
+
+
+
+
+
+```
+
+## Baseline comparison
+
+To decide on the model used, a baseline feature set is constructed, which consists of every variable in the base dataset, and the 50-dimension document vectors aggregated using the maximum function. This is selected based on its relatively small size, but expected high performance based on De Boom et al. (2016).
+
+For the comparison, the dataset is divided into 80% training and 20% test samples. The comparison is based on the accuracy of predictions on the test sample.
+
+The compared supervised learning methods include:
+
+* Logistic regression
+* Logistic regression with Lasso regularisation
+* Logistic regression with Ridge regularisation
+* Logistic regression with Elastic net regularisation 
+* Random Forest
+* XGBoost
+
+XGBoost (Chen and Guestrin, 2016) is a computationally efficient implementation of the gradient-boosting classifier (Hastie et al., 2009). Like the Random Forest, it is also an ensemble of decision trees, but instead of simultaneously fitting different trees, it is estimated by sequentially fitting small trees on the gradient of the objective function^[logistic loss function with a regularisation term], reducing the error in every iteration. Hu and Yang’s (2019) top-performing model uses this technique, outperforming every other method compared here.
+
+In the case of the regularised logistic regressions, the regularisation hyperparameters are chosen optimally using 5-fold cross-validation (Refaeilzadeh et al., 2009). For the Random Forest, the number of trees is set at 200, based on Hu and Yang (2019). XGBoost models are estimated in two stages. In the first stage, trees are grown iteratively with 5-fold cross-validation, until the mean accuracy stops increasing. The model is then trained on the whole training sample with the optimal number of iterations set based on the first stage.
+
+
+```{r compare_supervised_learning_methods,message=FALSE}
+### Create reproducible partitions for a training and a test set
+set.seed(42)
+train<-createDataPartition(usedprojects$state,times=1,p=0.8,list=FALSE)
+
+### Build contrast-encoded matrices for categorical variables
+currency<-sparse.model.matrix( ~ ., data = usedprojects %>% select(currency))[,-1] %>% as.matrix %>% as.data.table
+country<-sparse.model.matrix( ~ ., data = usedprojects %>% select(country))[,-1] %>% as.matrix %>% as.data.table
+category<-sparse.model.matrix( ~ ., data = usedprojects %>% select(category))[,-1] %>% as.matrix %>% as.data.table
+duration<-usedprojects %>% select(duration) %>% as.data.table
+usd_goal_real<-usedprojects %>% select(usd_goal_real) %>% as.data.table
+goal<-usedprojects %>% select(goal) %>% as.data.table
+
+### Only execute comparison once, mainly used to reduce knitting time.
+if(!file.exists("./Out/baselineres.csv")){
+  
+  
+  ### Reload docvectors50max
+  if (!file.exists('./docvectors/docvector50max.csv')) {
+    docvectors50max<-createdocvectors(tokwords=tokenizedwords,operation = "max",embeds = word_embeddings50,length = 50)
+  } else {
+    docvectors50max<-fread('./docvectors/docvector50max.csv',encoding = 'UTF-8')
+  }
+  
+  ### Define baseline dataset
+  baseline<-usedprojects %>% select(state) %>% bind_cols(currency,country,goal,category,duration,usd_goal_real,docvectors50max)
+  
+  
+  ### Define baseline training and test sets
+  basetrain <- baseline[train,]
+  basetestX <- baseline[-train,] %>% select(-state) %>% as.matrix()
+  basetestY <- baseline[-train,]$state %>% factor(levels=c(0,1))
+  
+  
+  set.seed(42)
+  logit<-glm(family="binomial",formula = state~.,data=basetrain)
+  
+  set.seed(42)
+  cv.lasso<-cv.glmnet(family="binomial",x=basetrain %>% select(-state) %>% as.matrix,y=basetrain$state,alpha=1,nfolds=5)
+  
+  set.seed(42)
+  cv.ridge<-cv.glmnet(family="binomial",x=basetrain %>% select(-state) %>% as.matrix,y=basetrain$state,alpha=0,nfolds=5)
+  
+  set.seed(42)
+  cv.elnet<-cv.glmnet(family="binomial",x=basetrain %>% select(-state) %>% as.matrix,y=basetrain$state,alpha=0.5,nfolds=5)
+  
+  set.seed(42)
+  rf<-randomForest(x=basetrain %>% select(-state),y=basetrain$state %>% factor(),ntree=200)
+  
+  set.seed(42)
+  xgbcv<-xgb.cv(data=basetrain %>% select(-state) %>% as.matrix,booster = "gbtree", objective = "binary:logistic",
+                label=basetrain$state,nrounds=500,nfold=5,stratified = F,
+                early_stopping_rounds = 10,eval_metric="error",verbose = F)
+  
+  best_iter<- xgbcv$best_iteration
+  
+  set.seed(42)
+  xgb<-xgboost(booster = "gbtree", objective = "binary:logistic",data=basetrain %>% select(-state) %>% as.matrix,
+               label=basetrain$state,nrounds=best_iter,eval_metric="error",verbose = F)
+  
+  
+  
+ 
+  logitpreds<-logit %>% predict(basetestX %>% as.data.frame)
+  logitpreds<-ifelse(logitpreds>0,1,0) %>% factor(levels=c(0,1))
+  
+  lassopreds<-cv.lasso %>% predict(basetestX)
+  lassopreds<-ifelse(lassopreds>0,1,0) %>% factor(levels=c(0,1))
+  
+  ridgepreds<-cv.ridge %>% predict(basetestX)
+  ridgepreds<-ifelse(ridgepreds>0,1,0) %>% factor(levels=c(0,1))
+  
+  elnetpreds<-cv.elnet %>% predict(basetestX)
+  elnetpreds<-ifelse(elnetpreds>0,1,0) %>% factor(levels=c(0,1))
+  
+  rfpreds<-rf %>% predict(basetestX) %>% factor(levels=c(0,1))
+  
+  xgbpreds<-xgb %>% predict(basetestX)
+  xgbpreds<-ifelse(xgbpreds>0.5,1,0) %>% factor(levels=c(0,1))
+  
+  methods<-c("Logit","Lasso","Ridge","Elastic net","Random Forest","XGBoost")
+  
+  accuracies<-c(
+    confusionMatrix(logitpreds,basetestY)$overall[1],
+    confusionMatrix(lassopreds,basetestY)$overall[1],
+    confusionMatrix(ridgepreds,basetestY)$overall[1],
+    confusionMatrix(elnetpreds,basetestY)$overall[1],
+    confusionMatrix(rfpreds,basetestY)$overall[1],
+    confusionMatrix(xgbpreds,basetestY)$overall[1]
+  )
+  
+  baselineres<-data.frame(methods=methods,accuracy=accuracies)
+  baselineres$accuracy<-baselineres$accuracy*100
+  dir.create("./Out/",showWarnings = F)
+  fwrite(baselineres %>% as.data.table,file="./Out/baselineres.csv",append=F,col.names=T)
+  
+  ### Clear memory
+  rm(baseline,basetrain,basetestX,basetestY,logit,cv.lasso,cv.ridge,cv.elnet,rf,xgbcv,xgb,best_iter,logitpreds,lassopreds,
+     ridgepreds,elnetpreds,rfpreds,xgbpreds,methods,accuracies)
+  gc() %>% invisible
+  
+} else {
+  baselineres<-fread(file="./Out/baselineres.csv",encoding="UTF-8")
+}
+### Save for final comparison
+baselinetop_acc<-max(baselineres$accuracy/100)
+
+ggplot(data=baselineres,mapping=aes(x=reorder(methods,-accuracy),y=accuracy,label=sprintf("%0.2f", round(accuracy, digits = 2)) %>% paste0("%"))) + geom_bar(stat="identity",fill="coral") + geom_text(hjust=1.25) + coord_flip() + labs(title="Figure 1: Baseline comparison",y="Accuracy",x="Method") + theme_bw()
+
+
+```
+
+Figure 1 shows XGBoost outperforming the other algorithms with an edge of 1.61% -points over the Random Forest and will be used exclusively in the following analysis.
+
+```{r xgbeval_helper,message=FALSE}
+
+evalxgb <- function(findat,trainindices,strat=F,seed=42) {
+### Helper function to evaluate XGBoost on a given dataset 
+  
+  ### Split to training and test samples
+  training_set<-findat[trainindices,]
+  test_set<-findat[-trainindices,]
+  
+  ### Evaluate optimal number of iterations by cross-validation
+  set.seed(42)
+  cveval<-xgb.cv(booster = "gbtree", objective = "binary:logistic",data=training_set %>% select(-state) %>% as.matrix, label=training_set$state,nrounds=500,nfold=5,stratified = strat,early_stopping_rounds = 10,eval_metric="error",verbose = F)
+  best_iter<- cveval$best_iteration
+  rm(cveval)
+  
+  ### Train classifier on training sample
+  set.seed(42)
+  clf<-xgboost(booster = "gbtree", objective = "binary:logistic",data=training_set %>% select(-state) %>% as.matrix, label=training_set$state,nrounds=best_iter,eval_metric="error",verbose = F)
+  
+  ### Generate predictions on test sample
+  testpreds<-clf %>% predict(test_set %>% select(-state) %>% as.matrix)
+  testpreds<-testpreds %>% sapply(function(k){if(k>0.5) return(1) else return(0)})
+  
+  ### Generate confusion matrix
+  cm<-confusionMatrix(testpreds %>% factor(levels=c(0,1)),test_set$state %>% factor(levels=c(0,1)))
+  
+
+  paste0("Finished after ", best_iter," iterations") %>% print
+
+  ### Cleanup
+  rm(clf,training_set,test_set)
+  gc() %>% invisible
+  
+  ### return confusion matrix
+  return(cm)
+
+}
+
+
+
+```
+
+## Document vector comparison
+
+In this step, XGBoost models are fitted on the baseline dataset with the document vectors replaced with alternatives created in Step 1 to choose the document vectors that achieve the best test accuracy. 
+
+```{r compare_docvectors,message=FALSE}
+
+### Define dataset without any document vectors
+nodvdata<-usedprojects %>% select(state) %>% bind_cols(currency,goal,country,category,usd_goal_real,duration)
+
+### Load mean aggregated vectors
+if (!file.exists('./docvectors/docvector50mean.csv')) {
+  docvectors50mean<-createdocvectors(tokwords=tokenizedwords,operation = "mean",embeds = word_embeddings50,length = 50)
+} else {
+  docvectors50mean<-fread('./docvectors/docvector50mean.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector200mean.csv')) {
+  docvectors200mean<-createdocvectors(tokwords=tokenizedwords,operation = "mean",embeds = word_embeddings200,length = 200)
+} else {
+  docvectors200mean<-fread('./docvectors/docvector200mean.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector300mean.csv')) {
+  docvectors300mean<-createdocvectors(tokwords=tokenizedwords,operation = "mean",embeds = word_embeddings300,length = 300)
+} else {
+  docvectors300mean<-fread('./docvectors/docvector300mean.csv',encoding = 'UTF-8')
+}
+
+
+meanvectors<-list(docvectors50mean,docvectors200mean,docvectors300mean)
+
+### Only run if file has not yet been created to save runtime
+if(!file.exists("./Out/embeddingcomparison.csv")){
+  
+  ### Iterate through number of vectors and save results, dumping the results to disk
+  meanresults<-data.frame(
+    vectors=c(50,200,300),
+    method="mean",
+    test_accuracy=sapply(meanvectors,function(vect) {
+      accuracy<-evalxgb(nodvdata %>% bind_cols(vect),train)$overall[1]
+      return(accuracy)})
+  )
+  fwrite(meanresults,col.names=T,file="./Out/embeddingcomparison.csv",append=F)
+}
+
+### Cleanup
+rm(docvectors50mean,docvectors200mean,docvectors300mean,meanvectors)
+gc() %>% invisible
+
+
+
+### Same operation for max aggregation
+if (!file.exists('./docvectors/docvector50max.csv')) {
+  docvectors50max<-createdocvectors(tokwords=tokenizedwords,operation = "max",embeds = word_embeddings50,length = 50)
+} else {
+  docvectors50max<-fread('./docvectors/docvector50max.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector200max.csv')) {
+  docvectors200max<-createdocvectors(tokwords=tokenizedwords,operation = "max",embeds = word_embeddings200,length = 200)
+} else {
+  docvectors200max<-fread('./docvectors/docvector200max.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector300max.csv')) {
+  docvectors300max<-createdocvectors(tokwords=tokenizedwords,operation = "max",embeds = word_embeddings300,length = 300)
+} else {
+  docvectors300max<-fread('./docvectors/docvector300max.csv',encoding = 'UTF-8')
+}
+
+
+maxvectors<-list(docvectors50max,docvectors200max,docvectors300max)
+
+### Instead of checking for existence of file, check whether it contains this part of the comparison already
+if(!("max" %in% fread(file="./Out/embeddingcomparison.csv",encoding="UTF-8")$method)){
+  maxresults<-data.frame(
+    vectors=c(50,200,300),
+    method="max",
+    test_accuracy=sapply(maxvectors,function(vect) {
+      accuracy<-evalxgb(nodvdata %>% bind_cols(vect),train)$overall[1]
+      return(accuracy)})
+  )
+  fwrite(maxresults,col.names=F,file="./Out/embeddingcomparison.csv",append=T)
+}
+
+rm(docvectors50max,docvectors200max,docvectors300max,maxvectors)
+gc() %>% invisible
+
+
+### Same operation for minmax aggregation
+if (!file.exists('./docvectors/docvector50minmax.csv')) {
+  docvectors50minmax<-createdocvectors(tokwords=tokenizedwords,operation = "minmax",embeds = word_embeddings50,length = 50)
+} else {
+  docvectors50minmax<-fread('./docvectors/docvector50minmax.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector200minmax.csv')) {
+  docvectors200minmax<-createdocvectors(tokwords=tokenizedwords,operation = "minmax",embeds = word_embeddings200,length = 200)
+} else {
+  docvectors200minmax<-fread('./docvectors/docvector200minmax.csv',encoding = 'UTF-8')
+}
+if (!file.exists('./docvectors/docvector300minmax.csv')) {
+  docvectors300minmax<-createdocvectors(tokwords=tokenizedwords,operation = "minmax",embeds = word_embeddings300,length = 300)
+} else {
+  docvectors300minmax<-fread('./docvectors/docvector300minmax.csv',encoding = 'UTF-8')
+}
+
+
+minmaxvectors<-list(docvectors50minmax,docvectors200minmax,docvectors300minmax)
+
+if(!("minmax" %in% fread(file="./Out/embeddingcomparison.csv",encoding="UTF-8")$method)){
+  minmaxresults<-data.frame(
+    vectors=c(50,200,300),
+    method="minmax",
+    test_accuracy=sapply(minmaxvectors,function(vect) {
+      accuracy<-evalxgb(nodvdata %>% bind_cols(vect),train)$overall[1]
+      return(accuracy)})
+  )
+  fwrite(minmaxresults,col.names=F,file="./Out/embeddingcomparison.csv",append=T)
+}
+
+rm(docvectors50minmax,docvectors200minmax,docvectors300minmax,minmaxvectors)
+gc() %>% invisible
+
+### Read-back full results
+endres<-fread(file="./Out/embeddingcomparison.csv",encoding="UTF-8",data.table=F)
+endres<-endres %>% mutate(test_accuracy=round(test_accuracy*100,2))
+
+### Save top result for final comparison
+topdocvector_acc<-max(endres$test_accuracy/100)
+
+### Print table for interpretation
+
+ xtabs(data=endres,formula=test_accuracy~.)  %>% kable(caption="Table 1: Document vector comparison (Percentages)")
+
+
+```
+
+Table 1 indicates that performance differences across the document vectors are minor with mean aggregation slightly lagging and min-max aggregation attaining the top spot. Vector sizes do not seem to systematically impact performance across aggregations. The 200-dimension min-max-aggregated vector, along with the other variables constitute the final dataset.
+
+## Hyperparameter tuning & Final comparison
+
+The final optimisation step involves tuning two further hyperparameters of XGBoost: learning rate and maximum tree depth. The former controls the size of the steps along the objective function, while the maximum depth hyperparameter limits the size of the trees to control overfitting. To find the optimal parameters a conservatively sized grid-search is executed, where 12 parameter combinations are compared by cross-validation. The combination attaining the highest accuracy is selected to train the final model. The process led to a further improvement in test accuracy, resulting in a 69.97% for the final model, exceeding the bar (69.8%) set by Hu and Yang (2019). A larger, more comprehensive tuning process that spans to additional hyperparameters could still marginally increase accuracy, however, due to computational constraints, this is not pursued further.
+
+```{r hyperparameter_tuning,message=FALSE,}
+
+### Reload 200minmax document vector
+if (!file.exists('./docvectors/docvector200minmax.csv')) {
+  docvectors200minmax<-createdocvectors(tokwords=tokenizedwords,operation = "minmax",embeds = word_embeddings200,length = 200)
+} else {
+  docvectors200minmax<-fread('./docvectors/docvector200minmax.csv',encoding = 'UTF-8')
+}
+
+### Define final dataset
+findata <- bind_cols(nodvdata,docvectors200minmax)
+
+
+if(!file.exists("./Out/hypoptresults.csv")){
+  
+  ### Define search-grid
+  param_options <- list(eta=c(0.05, 0.1, 0.3),
+   max_depth=seq(4,10,by=2))
+  param_sets <- cross_df(param_options) 
+  
+  ### Evaluate XGBoost for every parameter combination
+  xgb_scores <- pmap(param_sets, function(eta, max_depth) {
+    
+    set.seed(42)
+    
+    cvmodel <- xgb.cv(
+      params=list(eta=eta, max_depth=max_depth), 
+      booster = "gbtree",
+      data=findata[train,] %>% select(-state) %>% as.matrix, 
+      label=findata[train,]$state,
+      nrounds=5000, 
+      early_stopping_rounds=5,
+      objective="binary:logistic",
+      nfold=5,
+      eval_metric="error",
+      verbose=0,
+      stratified = F)
+    paste0("eta:",eta, " md:", max_depth," finished. ") %>% print()
+    gc() %>% invisible
+    return(data.table(nrounds=cvmodel$best_iteration,eta=eta,max_depth=max_depth,cv_error=cvmodel$evaluation_log[cvmodel$best_iteration,"test_error_mean"] %>% unlist) %>% as.data.table)
+  }) %>% bind_rows
+  
+  ### Save results
+  fwrite(xgb_scores,col.names=T,file="./Out/hypoptresults.csv")
+  
+} else {
+  
+  xgb_scores<-fread("./Out/hypoptresults.csv",encoding = 'UTF-8')
+  
+}
+
+if(!file.exists("./Out/fin.model")){
+  
+  ### Train final model using optimal hyperparameters and save to disk.
+  top_params<-xgb_scores[xgb_scores$cv_error==xgb_scores$cv_error %>% min,]
+  finalmodel<-xgboost(booster = "gbtree",
+                      objective = "binary:logistic",
+                      data=findata[train,] %>% select(-state) %>% as.matrix, 
+                      label=findata[train,]$state,
+                      nrounds=top_params$nrounds,
+                      params=list(max_depth=top_params$max_depth,eta=top_params$eta),
+                      eval_metric="error",
+                      verbose = F)
+  xgb.save(finalmodel,"./Out/fin.model")
+  
+} else {
+  
+  finalmodel<-xgb.load("./Out/fin.model")
+  
+}
+
+### Save accuracy for final evaluation
+finaltestpreds<-finalmodel %>% predict(findata[-train,] %>% select(-state) %>% as.matrix)
+finaltestpreds<-ifelse(finaltestpreds>0.5,1,0) %>% factor(levels=c(0,1))
+finalmodel_acc<-confusionMatrix(finaltestpreds,findata[-train,]$state %>% factor(c(0,1)))$overall[1]
+```
+
+To assess the performance of the model, accuracies are compared from across the modelling process. Additionally, models estimated from individual variables are also included in the comparison.
+
+```{r diagnosis,message=FALSE}
+if(!file.exists("./Out/finalcomp.csv")){
+  
+  ### Evaluate XGBoost on indvidiual features
+  currency_acc<-evalxgb(usedprojects %>% select(state) %>% bind_cols(currency),train)$overall[1]
+  country_acc<-evalxgb(usedprojects %>% select(state) %>% bind_cols(country),train)$overall[1]
+  category_acc<-evalxgb(usedprojects %>% select(state) %>% bind_cols(category),train)$overall[1]
+  goal_acc<-evalxgb(usedprojects %>% select(state) %>% bind_cols(goal),train)$overall[1]
+  docvector200minmax_acc<-evalxgb(usedprojects %>% select(state) %>% bind_cols(docvectors200minmax),train)$overall[1]
+  usd_goal_real_acc<-evalxgb(usedprojects %>% select(state) %>% bind_cols(usd_goal_real),train)$overall[1]
+  duration_acc<-evalxgb(usedprojects %>% select(state) %>% bind_cols(duration),train)$overall[1]
+  
+  ### Evaluate every feature except for the document vector
+  nodvdata_acc<-evalxgb(nodvdata,train)$overall[1]
+  
+  ### Add naive classification baseline accuracy
+  naiveclassification_acc<-max(1-findata[-train,]$state %>% mean,findata[-train,]$state %>% mean)
+  
+  ### Create comparison dataframe
+  finalcomparison<-data.frame(model=c("Naive-classification: All fail","Only currency",
+                                      "Only country",
+                                      "Only category","Only goal", "Only real USD goal",
+                                      "Only duration",
+                                      "Every non-title feature","Document vectors only (200minmax)",
+                                      "Top from baseline comparison",
+                                      "Top from document vector comparison",
+                                      "Final Model after hyperparameter optimisation"), 
+                              accuracy = c(naiveclassification_acc,
+                                           currency_acc,country_acc,category_acc,goal_acc,
+                                           usd_goal_real_acc, duration_acc,
+                                           nodvdata_acc,
+                                           docvector50minmax_acc,baselinetop_acc,
+                                           topdocvector_acc, finalmodel_acc))
+  ### Scale to percentages
+  finalcomparison$accuracy<-finalcomparison$accuracy*100
+  ### Save to disk
+  fwrite(finalcomparison,file="./Out/finalcomp.csv")
+  
+} else {
+  
+  finalcomparison<-fread(file = "./Out/finalcomp.csv")
+  
+}
+ggplot(data=finalcomparison,mapping=aes(x=reorder(model,-accuracy),y=accuracy,label=sprintf("%0.2f", round(accuracy, digits = 2)) %>% paste0("%"))) + geom_bar(stat="identity",fill="coral") + geom_text(hjust=1.25) + coord_flip() +labs(title="Figure 2: Final comparison",y="Accuracy",x="Model")+theme_bw() 
+
+
+```
+
+Based on Figure 2, the most informative feature alone is the category, while the 200-min-max document vector comes out slightly behind. Country and Currency by themselves do not seem to be predictive of success, however, their interactions may still be relevant, so they are included in later steps too. When combining every feature except for the document vectors, the result increases to 68.46%, falling 1.2%-points behind the baseline comparison. The inclusion of the title document vectors substantially increases the test accuracy of the model, however, choosing the optimal aggregation and size only leads to marginal improvements. 
+
+# Conclusion
+
+This paper estimated an XGBoost model predicting Kickstarter project success with an accuracy of almost 70%, making use of document vectors derived from the pre-trained GloVe vectors. The analysis suggests that titles contain relevant information about project success, which is likely to be correlated with the quality of the project, reflecting the communication and marketing skills of the campaign manager. Further analysis of the model could explore the semantic drivers of achieving a high probability of success.
+
+
+
+# References
+
+Bahad, P., Saxena, P., 2020. Study of AdaBoost and Gradient Boosting Algorithms for Predictive Analytics. International Conference on Intelligent Computing and Smart Communication 2019 235–244. https://doi.org/10.1007/978-981-15-0633-8_22
+
+Breiman, L., 2001. Random Forests. Machine Learning 45, 5–32. https://doi.org/10.1023/A:1010933404324
+
+Chen, K., Jones, B., Kim, I., 2013. KickPredict : Predicting Kickstarter Success [WWW Document]. URL /paper/KickPredict-%3A-Predicting-Kickstarter-Success-Chen-Jones/fcfc059870dea7f70f3acc86735dc03601d302b6 (accessed 5.7.21).
+
+Chen, T., Guestrin, C., 2016. XGBoost: A Scalable Tree Boosting System. Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining 785–794. https://doi.org/10.1145/2939672.2939785
+
+De Boom, C., Van Canneyt, S., Demeester, T., Dhoedt, B., 2016. Representation learning for very short texts using weighted word embedding aggregation. Pattern Recognition Letters 80, 150–156. https://doi.org/10.1016/j.patrec.2016.06.012
+
+Etter, V., Grossglauser, M., Thiran, P., 2013. Launch hard or go home!: predicting the success of kickstarter campaigns, in: Proceedings of the First ACM Conference on Online Social Networks - COSN ’13. Presented at the the first ACM conference, ACM Press, Boston, Massachusetts, USA, pp. 177–182. https://doi.org/10.1145/2512938.2512957
+
+Hastie, T., Tibshirani, R., Friedman, J., 2009. Boosting and Additive Trees. The Elements of Statistical Learning 337–387. https://doi.org/10.1007/978-0-387-84858-7_10
+
+Hu, W., Yang, R., 2019. Predicting the Success of Kickstarter Projects in the US at Launch Time, in: Intelligent Systems and Applications. Presented at the Proceedings of SAI Intelligent Systems Conference, Springer, Cham, pp. 497–506. https://doi.org/10.1007/978-3-030-29516-5_39
+
+Kickstarter, n.d. About — Kickstarter [WWW Document]. URL https://www.kickstarter.com/about?ref=global-footer (accessed 5.7.21a).
+
+Kickstarter, n.d. Kickstarter Stats — Kickstarter [WWW Document]. URL https://www.kickstarter.com/help/stats (accessed 5.7.21b).
+
+Kleinbaum, D.G., Klein, M., 2010. Introduction to Logistic Regression. Logistic Regression 1–39. https://doi.org/10.1007/978-1-4419-1742-3_1
+
+Mouillé, M., 2018. Kickstarter Projects [WWW Document]. URL https://kaggle.com/kemical/kickstarter-projects (accessed 4.10.21).
+
+Parker, Robert, Graff, David, Kong, Junbo, Chen, Ke, Maeda, Kazuaki, n.d. English Gigaword Fifth Edition. https://doi.org/10.35111/WK4F-QT80
+
+Pennington, J., Socher, R., Manning, C.D., 2014. GloVe: Global Vectors for Word Representation, in: Empirical Methods in Natural Language Processing (EMNLP). pp. 1532–1543.
+
+Refaeilzadeh, P., Tang, L., Liu, H., 2009. Cross-Validation, in: LIU, L., ÖZSU, M.T. (Eds.), Encyclopedia of Database Systems. Springer US, Boston, MA, pp. 532–538. https://doi.org/10.1007/978-0-387-39940-9_565
+
+Sawhney, K., Tran, C., Tuason, R., 2016. Using Language to Predict Kickstarter Success.
+
+Suthaharan, S., 2016. Support Vector Machine. Machine Learning Models and Algorithms for Big Data Classification 207–235. https://doi.org/10.1007/978-1-4899-7641-3_9
+
+Zhao, Y., Harris, P., Lam, W., 2019. Crowdfunding industry—History, development, policies, and potential issues. Journal of Public Affairs 19, e1921. https://doi.org/10.1002/pa.1921
+
+# Software used
+
+Bates, D., Maechler, M., 2021. Matrix: Sparse and Dense Matrix Classes and Methods.
+
+Benoit, K., Muhr, D., Watanabe, K., 2021. stopwords: Multilingual Stopword Lists.
+
+Breiman, F. original by L., Cutler, A., Liaw, R. port by A., Wiener, M., 2018. randomForest: Breiman and Cutler’s Random Forests for Classification and Regression.
+
+Chen, T., He, T., Benesty, M., Khotilovich, V., Tang, Y., Cho, H., Chen, K., Mitchell, R., Cano, I., Zhou, T., Li, M., Xie, J., Lin, M., Geng, Y., Li, Y., 2021. xgboost: Extreme Gradient Boosting.
+
+Dowle, M., Srinivasan, A., 2021. data.table: Extension of `data.frame`.
+
+Eddelbuettel, D., 2020. RcppZiggurat: “Rcpp” Integration of Different ‘Ziggurat’ Normal RNG 
+Implementations.
+
+Eddelbuettel, D., 2013. Seamless R and C++ Integration with Rcpp. Springer, New York. 
+https://doi.org/10.1007/978-1-4614-6868-4
+
+Eddelbuettel, D., Balamuta, J.J., 2018. Extending extitR with extitC++: A Brief Introduction to 
+extitRcpp. The American Statistician 72, 28–36. https://doi.org/10.1080/00031305.2017.1375990
+
+Eddelbuettel, D., François, R., 2011. Rcpp: Seamless R and C++ Integration. Journal of Statistical 
+Software 40, 1–18. https://doi.org/10.18637/jss.v040.i08
+
+Eddelbuettel, D., Francois, R., Allaire, J.J., Ushey, K., Kou, Q., Russell, N., Bates, D., Chambers,
+J., 2021. Rcpp: Seamless R and C++ Integration.
+
+Friedman, J., Hastie, T., Tibshirani, R., 2010. Regularization Paths for Generalized Linear Models 
+via Coordinate Descent. Journal of Statistical Software 33, 1–22.
+
+Friedman, J., Hastie, T., Tibshirani, R., Narasimhan, B., Tay, K., Simon, N., 2021. glmnet: Lasso 
+and Elastic-Net Regularized Generalized Linear Models.
+
+Gorman, B., 2018. mltools: Machine Learning Tools.
+
+Henry, L., Wickham, H., 2020. purrr: Functional Programming Tools.
+
+Izrailev, S., 2021. tictoc: Functions for Timing R Scripts, as Well as Implementations of Stack and 
+List Structures.
+
+Kuhn, M., 2020. caret: Classification and Regression Training.
+
+Liaw, A., Wiener, M., 2002. Classification and Regression by randomForest. R News 2, 18–22.
+
+Meyer, D., Dimitriadou, E., Hornik, K., Weingessel, A., Leisch, F., 2021. e1071: Misc Functions of 
+the Department of Statistics, Probability Theory Group (Formerly: E1071), TU Wien.
+
+Mullen, L., 2018. tokenizers: Fast, Consistent Tokenization of Natural Language Text.
+
+Mullen, L.A., Benoit, K., Keyes, O., Selivanov, D., Arnold, J., 2018. Fast, Consistent Tokenization 
+of Natural Language Text. Journal of Open Source Software 3, 655. 
+https://doi.org/10.21105/joss.00655
+
+Müller, K., Wickham, H., 2021. tibble: Simple Data Frames.
+
+Papadakis, M., Tsagris, M., Dimitriadis, M., Fafalios, S., Tsamardinos, I., Fasiolo, M., Borboudakis, G., Burkardt, J., Zou, C., Lakiotaki, K., Chatzipantsiou, C., 2020. Rfast: A Collection of Efficient and Extremely Fast R Functions.
+
+R Core Team, 2021. R: A Language and Environment for Statistical Computing. R Foundation for Statistical Computing, Vienna, Austria.
+
+Saraswat, M., 2020. superml: Build Machine Learning Models Like Using Python’s Scikit-Learn Library 
+in R.
+
+Sarkar, D., 2020. lattice: Trellis Graphics for R.
+
+Sarkar, D., 2008. Lattice: Multivariate Data Visualization with R. Springer, New York.
+
+Selivanov, D., Bickel, M., Wang, Q., 2020. text2vec: Modern Text Mining Framework for R.
+
+Simon, N., Friedman, J., Hastie, T., Tibshirani, R., 2011. Regularization Paths for Cox’s Proportional Hazards Model via Coordinate Descent. Journal of Statistical Software 39, 1–13.
+
+Wickham, H., 2021a. forcats: Tools for Working with Categorical Variables (Factors).
+
+Wickham, H., 2021b. tidyr: Tidy Messy Data.
+
+Wickham, H., 2021c. tidyverse: Easily Install and Load the “Tidyverse.”
+
+Wickham, H., 2019. stringr: Simple, Consistent Wrappers for Common String Operations.
+
+Wickham, H., 2016. ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag New York.
+
+Wickham, H., Averick, M., Bryan, J., Chang, W., McGowan, L.D., François, R., Grolemund, G., Hayes, A., Henry, L., Hester, J., Kuhn, M., Pedersen, T.L., Miller, E., Bache, S.M., Müller, K., Ooms, J., Robinson, D., Seidel, D.P., Spinu, V., Takahashi, K., Vaughan, D., Wilke, C., Woo, K., Yutani, H., 2019. Welcome to the tidyverse. Journal of Open Source Software 4, 1686. https://doi.org/10.21105/joss.01686
+
+Wickham, H., Chang, W., Henry, L., Pedersen, T.L., Takahashi, K., Wilke, C., Woo, K., Yutani, H., Dunnington, D., 2020. ggplot2: Create Elegant Data Visualisations Using the Grammar of Graphics.
+
+Wickham, H., François, R., Henry, L., Müller, K., 2021. dplyr: A Grammar of Data Manipulation.
+
+Wickham, H., Hester, J., 2020. readr: Read Rectangular Text Data.
+
+Wickham, H., Seidel, D., 2020. scales: Scale Functions for Visualization.
+
+Xie, Y., 2021. knitr: A General-Purpose Package for Dynamic Report Generation in R.
+
+Xie, Y., 2015. Dynamic Documents with R and knitr, 2nd ed. Chapman and Hall/CRC, Boca Raton, Florida.
+
+Xie, Y., 2014. knitr: A Comprehensive Tool for Reproducible Research in R, in: Stodden, V., Leisch, F., Peng, R.D. (Eds.), Implementing Reproducible Computational Research. Chapman and Hall/CRC.
+
