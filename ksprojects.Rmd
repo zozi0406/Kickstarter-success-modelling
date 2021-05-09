@@ -11,7 +11,7 @@ body {
 text-align: justify}
 </style>
 
-Word count: 1489
+Word count: 1484
 
 ***
 
@@ -38,7 +38,7 @@ library(randomForest)
 
 # Introduction
 
-Since 2009, Kickstarter hosted crowdfunding campaigns raising over 5.8 billion USD to different projects, successfully funding over 200000 projects (Kickstarter, n.d.). The website focuses on all kinds of creative projects, spanning across the categories of art, technology, games, food, and others. Businesses seeking early financing face hard supply constraints generally due to the strong information asymmetries present in the market (Zhao et al., 2019). Crowdfunding platforms such as Kickstarter provide SMEs with an alternative way of raising capital. Despite the opportunity existing for any business, 61.28% (Kickstarter, n.d.) of projects do not reach their goal. This paper aims to estimate a predictive model of project success relying on the “Kickstarter Projects” dataset on Kaggle (Mouillé, 2018). 
+Since 2009, Kickstarter hosted crowdfunding campaigns raising over 5.8 billion USD to different projects, successfully funding over 200000 (Kickstarter, n.d.). The website focuses on all kinds of creative projects, spanning across the categories of art, technology, games, food, and others. Businesses seeking early financing face hard supply constraints generally due to the strong information asymmetries present in the market (Zhao et al., 2019). Crowdfunding platforms such as Kickstarter provide SMEs with an alternative way of raising capital. Despite the opportunity existing for any business, 61.28% (Kickstarter, n.d.) of projects do not reach their goal. This paper aims to estimate a predictive model of project success relying on the “Kickstarter Projects” dataset on Kaggle (Mouillé, 2018). 
 
 Predicting whether a project succeeds has been the focus of several papers in the last decade. Certain researchers (Chen et al., 2013; Etter et al., 2013) focused on predicting success mid-campaign, while others (Hu and Yang, 2019; Sawhney et al., 2016) aimed to predict it using data available before launch. The latter set of papers generally rely on the same input variables: country, category, goal, currency, duration, title, and description. Based on these, various data and text mining approaches are used to extract features used by their models. While Sawhney et al. (2016) compare different methods from the NLP toolkit, Hu and Yang (2019) use the length of titles and descriptions as features. Regarding the choice of classification algorithms, most of the mentioned papers compare several methods to find the most suitable one. Often used methods include the Logistic regression (Kleinbaum and Klein, 2010), AdaBoost (Bahad and Saxena, 2020), the Support Vector Machine (Suthaharan, 2016), the Random Forest (Breiman, 2001), and XGBoost (Chen and Guestrin, 2016).
 
@@ -51,7 +51,7 @@ The dataset (Mouillé, 2018) contains 378661 scraped Kickstarter projects that l
 * Category: project category; categorical variable
 * Currency: currency of the project; categorical variable
 * Goal: amount of currency to be raised; numerical variable
-* Goal in real USD: amount of real used to be raised indexed to the time of scraping on the 2nd of January 2018; numerical variable
+* Goal in real USD: amount of real USD to be raised indexed to the time of scraping on the 2nd of January 2018; numerical variable
 * Country: location of the project; categorical variable
 * Duration: days between the deadline and the launch date; numerical variable
 * State: successful, failed, live, cancelled, suspended, or undefined; categorical variable
@@ -62,7 +62,7 @@ The following 4 steps describe the estimation strategy:
 
 1. Creation of document vectors based on titles 
 2. Baseline comparison of classification methods
-3. Comparison of aggregation methods and dimension of document vectors
+3. Comparison of aggregation methods and dimensions of document vectors
 4. Hyperparameter optimisation and final comparison
 
 ```{r importdata,message=FALSE}
@@ -95,14 +95,14 @@ ksprojects$state <- ksprojects$state %>% str_replace("successful","1") %>% str_r
 
 The method of word embeddings entails the representation of words with numerical vectors based on their co-occurrence in a corpus. The specific type of word embeddings used by this project are the GloVe 6B vectors (Pennington et al., 2014) pre-trained on Wikipedia and the Gigaword 5 dataset (Parker, Robert et al., n.d.). The package includes word embeddings for 400000 words with 50, 200 or 300 length vectors. These are chosen above the other available pre-trained GloVe vectors, as they have a generic vocabulary (as opposed to the 2B vectors, which come from Twitter), but still contain vectors with smaller dimensions.
 
-To prepare the data for matching with the word vectors, the titles are broken up into tokens and a vocabulary is built and pruned to include words that appear at least 5 times. The words in the vocabulary that also appear in the word embeddings are joined with their numerical representations, constituting lexicons for every vector length. As not every word is contained in the GloVe vectors, leading to additional pruning of the vocabulary. Projects without any meaningful tokens are dropped, leaving 319264 projects as the final number of observations. Note that this introduces a limitation for future predictions of the model, as it can only accept projects with at least one meaningful term.
+To prepare the data for matching with the word vectors, the titles are broken up into tokens and a vocabulary is built and pruned to include words that appear at least 5 times. The words in the vocabulary that also appear in the word embeddings are joined with their numerical representations, constituting lexicons for every vector length. Not every word is contained in the GloVe vectors, so the vocabulary is pruned further. Projects without any meaningful tokens are dropped, leaving 319264 projects as the final number of observations. Note that this introduces a limitation for future predictions of the model, as it can only accept projects with at least one meaningful term.
 
 ```{r name_column_processing,message=FALSE,warning=FALSE}
 
 
 ### Throughout the script, if statements checking for the existence of files, such as the one below, are included to allow the script to execute without re-running every line.
 ### The aim of this is to reduce unnecessary runtime, as the full project takes roughly 24 hours to finish. When the intermediate and final results are in place, the script executes in a matter of minutes.
-### The document vectors created below need to be created using the script, as they exceed the maximum file size of Github of 100MB. This process is still time-consuming, taking a few of hours.
+### The document vectors in the following section need to be created using the script, as they exceed the maximum file size of Github of 100MB. This process is still time-consuming, taking a few of hours.
 ### The result files can be found on Github: https://github.com/zozi0406/Kickstarter-success-modelling
 ### The GloVe vectors are downloaded via the code below.
 if (!file.exists('glove.6B.zip')) {
@@ -299,9 +299,9 @@ gc() %>% invisible
 
 ## Baseline comparison
 
-To decide on the model used, a baseline feature set is constructed, which consists of every variable in the base dataset, and the 50-dimension document vectors aggregated using the maximum function. This is selected based on its relatively small size, but expected high performance based on De Boom et al. (2016).
+To decide on the method used, a baseline feature set is constructed, which consists of every variable in the base dataset, and the 50-dimension document vectors aggregated using the maximum function. This is selected based on its relatively small size, but expected high performance based on De Boom et al. (2016).
 
-For the comparison, the dataset is divided into 80% training and 20% test samples. The comparison is based on the accuracy of predictions on the test sample.
+The dataset is divided into 80% training and 20% test samples and the comparison is based on the accuracy of predictions on the test sample.
 
 The compared supervised learning methods include:
 
@@ -350,7 +350,7 @@ if(!file.exists("./Out/baselineres.csv")){
   basetestX <- baseline[-train,] %>% select(-state) %>% as.matrix()
   basetestY <- baseline[-train,]$state %>% factor(levels=c(0,1))
   
-  
+  ### Train individual classifiers
   set.seed(42)
   logit<-glm(family="binomial",formula = state~.,data=basetrain)
   
@@ -379,7 +379,7 @@ if(!file.exists("./Out/baselineres.csv")){
   
   
   
- 
+  ### Generate predictions
   logitpreds<-logit %>% predict(basetestX %>% as.data.frame)
   logitpreds<-ifelse(logitpreds>0,1,0) %>% factor(levels=c(0,1))
   
@@ -399,6 +399,7 @@ if(!file.exists("./Out/baselineres.csv")){
   
   methods<-c("Logit","Lasso","Ridge","Elastic net","Random Forest","XGBoost")
   
+  ### Save accuracies
   accuracies<-c(
     confusionMatrix(logitpreds,basetestY)$overall[1],
     confusionMatrix(lassopreds,basetestY)$overall[1],
@@ -407,7 +408,7 @@ if(!file.exists("./Out/baselineres.csv")){
     confusionMatrix(rfpreds,basetestY)$overall[1],
     confusionMatrix(xgbpreds,basetestY)$overall[1]
   )
-  
+  ### Construct dataframe of results
   baselineres<-data.frame(methods=methods,accuracy=accuracies)
   baselineres$accuracy<-baselineres$accuracy*100
   dir.create("./Out/",showWarnings = F)
@@ -429,7 +430,7 @@ ggplot(data=baselineres,mapping=aes(x=reorder(methods,-accuracy),y=accuracy,labe
 
 ```
 
-Figure 1 shows XGBoost outperforming the other algorithms with an edge of 1.61% -points over the Random Forest and will be used exclusively in the following analysis.
+Figure 1 shows XGBoost outperforming the other algorithms with an edge of 1.61%-points over the Random Forest and will be used exclusively in the following analysis.
 
 ```{r xgbeval_helper,message=FALSE}
 
@@ -475,7 +476,7 @@ evalxgb <- function(findat,trainindices,strat=F,seed=42) {
 
 ## Document vector comparison
 
-In this step, XGBoost models are fitted on the baseline dataset with the document vectors replaced with alternatives created in Step 1 to choose the document vectors that achieve the best test accuracy. 
+In this step, XGBoost models are fitted on the baseline dataset with the document vectors replaced with alternatives from step 1 to choose the document vectors that achieve the best test accuracy. 
 
 ```{r compare_docvectors,message=FALSE}
 
@@ -739,7 +740,7 @@ ggplot(data=finalcomparison,mapping=aes(x=reorder(model,-accuracy),y=accuracy,la
 
 ```
 
-Based on Figure 2, the most informative feature alone is the category, while the 200-min-max document vector comes out slightly behind. Country and Currency by themselves do not seem to be predictive of success, however, their interactions may still be relevant, so they are included in later steps too. When combining every feature except for the document vectors, the result increases to 68.46%, falling 1.2%-points behind the baseline comparison. The inclusion of the title document vectors substantially increases the test accuracy of the model, however, choosing the optimal aggregation and size only leads to marginal improvements. 
+Based on Figure 2, the most informative feature alone is the category, while the 200-min-max document vector comes out slightly behind. Country and currency by themselves do not seem to be predictive of success, however, their interactions may still be relevant, so they are included in later steps too. When combining every feature except for the document vectors, the result increases to 68.46%, falling 1.2%-points behind the baseline comparison. The inclusion of the title document vectors substantially increases the test accuracy of the model, however, choosing the optimal aggregation and size only leads to marginal improvement. 
 
 # Conclusion
 
